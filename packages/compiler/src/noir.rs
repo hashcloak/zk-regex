@@ -2,15 +2,30 @@ use std::{cmp::max, fs::File, io::Write, path::Path};
 
 use crate::structs::RegexAndDFA;
 
-pub fn gen_noir_fn(regex_and_dfa: &RegexAndDFA, path: &Path) -> Result<(), std::io::Error> {
-    let noir_fn = to_noir_fn(regex_and_dfa);
+pub fn gen_noir_fn(
+    regex_and_dfa: &RegexAndDFA,
+    path: &Path,
+    gen_substrs: bool,
+) -> Result<(), std::io::Error> {
+    let noir_fn = to_noir_fn(regex_and_dfa, gen_substrs);
     let mut file = File::create(path)?;
     file.write_all(noir_fn.as_bytes())?;
     file.flush()?;
     Ok(())
 }
 
-fn to_noir_fn(regex_and_dfa: &RegexAndDFA) -> String {
+/// Generates Noir code based on the DFA and whether a substring should be extracted.
+///
+/// # Arguments
+///
+/// * `regex_and_dfa` - The `RegexAndDFA` struct containing the regex pattern and DFA.
+/// * `gen_substrs` - A boolean indicating whether to generate substrings. Note that this can only
+///                   be used in the `decomposed` setting.
+///
+/// # Returns
+///
+/// A `String` that contains the Noir code
+fn to_noir_fn(regex_and_dfa: &RegexAndDFA, gen_substrs: bool) -> String {
     let accept_state_id = {
         let last_state = regex_and_dfa.dfa.states.last().expect("no last state");
         assert!(
@@ -55,7 +70,7 @@ fn to_noir_fn(regex_and_dfa: &RegexAndDFA) -> String {
     let invalid_state = highest_state + 1;
     let mut end_anchor_logic = if regex_and_dfa.has_end_anchor {
         format!(
-          r#"
+            r#"
 for i in 0..{BYTE_SIZE} {{
     table[{accept_state_id} * {BYTE_SIZE} + i] = {invalid_state};
 }}
@@ -63,7 +78,7 @@ for i in 0..{BYTE_SIZE} {{
         )
     } else {
         format!(
-          r#"
+            r#"
 for i in 0..{BYTE_SIZE} {{
     table[{accept_state_id} * {BYTE_SIZE} + i] = {accept_state_id};
 }}
@@ -71,7 +86,6 @@ for i in 0..{BYTE_SIZE} {{
         )
     };
     end_anchor_logic = indent(&end_anchor_logic);
-
 
     let lookup_table = format!(
         r#"
@@ -86,8 +100,43 @@ comptime fn make_lookup_table() -> [Field; {table_size}] {{
       "#
     );
 
-    let fn_body = format!(
-        r#"
+    // If we want to extract a substring, retrieve the state in which the substring will be.
+    // *Assumes there is a single substring to be extracted*
+    // `substring_ranges` contains the "edges" that transition to and from the substring
+    // grab the end (=second part) of the first edge
+    let substr_state = regex_and_dfa
+        .substrings
+        .substring_ranges
+        .get(0)
+        .and_then(|first_set| first_set.iter().next())
+        .map(|&(_, second)| second)
+        .unwrap_or(0);
+
+    let fn_body = if gen_substrs {
+        format!(
+            r#"
+  global table = make_lookup_table();
+  pub fn regex_match<let N: u32>(input: [u8; N]) -> BoundedVec<Field, N> {{
+    // regex: {regex_pattern}
+    let mut s = 0;
+    let mut substring: BoundedVec<Field, N> = BoundedVec::new();
+    s = table[s * 256 + 255 as Field];
+    for i in 0..input.len() {{
+        let temp = input[i] as Field;
+        s = table[s * {BYTE_SIZE} + input[i] as Field];
+        if (s == {substr_state}) {{
+          substring.push(temp);
+      }}
+      }}
+    assert_eq(s, {accept_state_id}, f"no match: {{s}}");
+    substring
+  }}
+      "#,
+            regex_pattern = regex_and_dfa.regex_pattern,
+        )
+    } else {
+        format!(
+            r#"
 global table = make_lookup_table();
 pub fn regex_match<let N: u32>(input: [u8; N]) {{
     // regex: {regex_pattern}
@@ -99,8 +148,9 @@ pub fn regex_match<let N: u32>(input: [u8; N]) {{
     assert_eq(s, {accept_state_id}, f"no match: {{s}}");
 }}
     "#,
-        regex_pattern = regex_and_dfa.regex_pattern,
-    );
+            regex_pattern = regex_and_dfa.regex_pattern,
+        )
+    };
     format!(
         r#"
         {fn_body}
