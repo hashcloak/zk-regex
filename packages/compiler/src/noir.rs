@@ -1,4 +1,4 @@
-use std::{collections::HashSet, cmp::max, fs::File, io::Write, iter::FromIterator, path::Path};
+use std::{cmp::max, fs::File, io::Write, path::Path};
 
 use itertools::Itertools;
 
@@ -41,19 +41,6 @@ fn to_noir_fn(regex_and_dfa: &RegexAndDFA) -> String {
                 rows.push((state.state_id, char_code, tran_next_state_id));
             }
         }
-        if state.state_type == ACCEPT_STATE_ID {
-            let existing_char_codes = &state
-                .transitions
-                .iter()
-                .flat_map(|(_, tran)| tran.iter().copied().collect_vec())
-                .collect::<HashSet<_>>();
-            let all_char_codes = HashSet::from_iter(0..=255);
-            let mut char_codes = all_char_codes.difference(existing_char_codes).collect_vec();
-            char_codes.sort(); // to be deterministic
-            for &char_code in char_codes {
-                rows.push((state.state_id, char_code, state.state_id));
-            }
-        }
         highest_state = max(state.state_id, highest_state);
     }
 
@@ -68,32 +55,31 @@ fn to_noir_fn(regex_and_dfa: &RegexAndDFA) -> String {
     // If the regex ends with `$`, use this invalid state to invalidate
     // any transitions after `$`
     let invalid_state = highest_state + 1;
-    let mut end_anchor_logic = if regex_and_dfa.has_end_anchor {
-        format!(
+    
+    let mut end_anchor_logic = String::new();
+    // If regex_and_dfa.has_end_anchor tells us where the regex ends with `$`
+    if regex_and_dfa.has_end_anchor {
+      // If so, add transitions from each accept state to invalid state
+      // these can be overwritten by valid transitions from accept state further on
+      for acc_state in accept_state_ids.clone() {
+        end_anchor_logic += 
+        &format!(
           r#"
 for i in 0..{BYTE_SIZE} {{
-    table[{accept_state_id} * {BYTE_SIZE} + i] = {invalid_state};
+    table[{acc_state} * {BYTE_SIZE} + i] = {invalid_state};
 }}
             "#
-        )
-    } else {
-        format!(
-          r#"
-for i in 0..{BYTE_SIZE} {{
-    table[{accept_state_id} * {BYTE_SIZE} + i] = {accept_state_id};
-}}
-            "#
-        )
-    };
-    end_anchor_logic = indent(&end_anchor_logic);
-
+        );
+      }
+      end_anchor_logic = indent(&end_anchor_logic);
+    }
 
     let lookup_table = format!(
         r#"
 comptime fn make_lookup_table() -> [Field; {table_size}] {{
     let mut table = [0; {table_size}];
+    {end_anchor_logic}
 {lookup_table_body}
-
     table
 }}
       "#
