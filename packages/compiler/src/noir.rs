@@ -149,6 +149,7 @@ pub fn regex_match<let N: u32>(input: [u8; N]) -> [BoundedVec<Field, N>; {nr_sub
         s = table[s * {BYTE_SIZE} + input[i] as Field];
 {conditions}
     }}
+    s = table[254]; // marking the end of the string
     assert({final_states_condition_body}, f"no match: {{s}}");
     [{bounded_vec_names}]
 }}"#,
@@ -168,6 +169,7 @@ pub fn regex_match<let N: u32>(input: [u8; N]) {{
     for i in 0..input.len() {{
         s = table[s * {BYTE_SIZE} + input[i] as Field];
     }}
+    s = table[254]; // marking the end of the string
     assert({final_states_condition_body}, f"no match: {{s}}");
 }}"#,
             regex_pattern = regex_and_dfa.regex_pattern,

@@ -6,6 +6,7 @@ use crate::{
     },
     DecomposedRegexConfig,
 };
+use itertools::Itertools;
 use regex::Regex;
 use regex_automata::dfa::{
     dense::{Config, DFA},
@@ -1075,7 +1076,56 @@ pub(crate) fn create_regex_and_dfa_from_str_and_defs(
     regex_str: &str,
     substrs_defs_json: SubstringDefinitionsJson,
 ) -> Result<RegexAndDFA, CompilerError> {
-    let dfa = create_dfa_graph_from_regex(regex_str)?;
+    let mut dfa = create_dfa_graph_from_regex(regex_str)?;
+
+    if regex_str.ends_with('$') {
+        // Create a new accepting state, to which all accepting states transition if they encounter `254`
+        const ACCEPT_STATE_ID: &str = "accept";
+
+        let accept_state_ids = {
+            let accept_states: Vec<usize> = dfa
+                .states
+                .iter()
+                .filter(|s| s.state_type == ACCEPT_STATE_ID)
+                .map(|s| s.state_id)
+                .collect();
+            assert!(!accept_states.is_empty(), "no accept states");
+            accept_states
+        };
+
+        // Find the highest state ID to assign a new ID to the new node
+        let highest_state = dfa
+            .states
+            .iter()
+            .max_by_key(|state| state.state_id)
+            .map(|state| state.state_id);
+
+        // Create the new accepting state with no transitions
+        let new_state_id = highest_state.unwrap_or_default() + 1;
+        let new_node = DFAStateNode {
+            state_type: ACCEPT_STATE_ID.to_string(),
+            state_id: new_state_id,
+            transitions: BTreeMap::new(),
+        };
+
+        // Add the new node to the DFA
+        dfa.states.push(new_node);
+
+        // Update old accepting states:
+        // 1. they are no longer accepting states
+        // 2. they transition to the new accepting state when encountering `254`
+        for state in dfa.states.iter_mut() {
+            if accept_state_ids.contains(&state.state_id) {
+                state.state_type = String::new();
+
+                state
+                    .transitions
+                    .entry(new_state_id)
+                    .or_insert_with(BTreeSet::new)
+                    .insert(254);
+            }
+        }
+    }
 
     let substring_ranges = substrs_defs_json
         .transitions
@@ -1095,7 +1145,7 @@ pub(crate) fn create_regex_and_dfa_from_str_and_defs(
     Ok(RegexAndDFA {
         regex_pattern: regex_str.to_string(),
         dfa,
-        has_end_anchor: regex_str.ends_with('$'),
+        has_end_anchor: false, //regex_str.ends_with('$'),
         substrings,
     })
 }
